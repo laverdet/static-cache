@@ -94,30 +94,32 @@ module.exports = function staticCache(dir, options, files) {
       var stats = await fs.stat(file.path)
       if (stats.mtime > file.mtime) {
         file.mtime = stats.mtime
-        file.md5 = null
         file.length = stats.size
       }
     }
 
     ctx.response.lastModified = file.mtime
-    if (file.md5) ctx.response.etag = file.md5
 
     if (ctx.fresh)
       return ctx.status = 304
 
     ctx.type = file.type
     ctx.length = file.zipBuffer ? file.zipBuffer.length : file.length
-    ctx.set('cache-control', file.cacheControl || 'public, max-age=' + file.maxAge)
-    if (file.md5) ctx.set('content-md5', file.md5)
+    ctx.set('Cache-Control', file.cacheControl || 'public, max-age=' + file.maxAge)
 
     if (ctx.method === 'HEAD')
       return
 
     var acceptGzip = ctx.acceptsEncodings('gzip') === 'gzip'
+    var acceptBr = ctx.acceptsEncodings('br') === 'br'
 
-    if (file.zipBuffer) {
+    if (file.brBuffer && acceptBr) {
+      ctx.set('Content-Encoding', 'br')
+      ctx.body = file.brBuffer
+      return;
+    } else if (file.zipBuffer) {
       if (acceptGzip) {
-        ctx.set('content-encoding', 'gzip')
+        ctx.set('Content-Encoding', 'gzip')
         ctx.body = file.zipBuffer
       } else {
         ctx.body = file.buffer
@@ -133,13 +135,23 @@ module.exports = function staticCache(dir, options, files) {
     if (file.buffer) {
       if (shouldGzip) {
 
+        file.brBuffer = file.brBuffer || await new Promise((resolve, reject) => {
+          zlib.brotliCompress(file.buffer, (err, val) => err ? reject(err) : resolve(val), {
+            [zlib.constants.BROTLI_PARAM_QUALITY]: zlib.constants.BROTLI_MAX_QUALITY,
+          });
+        });
+        if (acceptBr) {
+          ctx.set('Content-Encoding', 'gzip')
+          ctx.body = file.brBuffer;
+          return;
+        }
         var gzFile = files.get(filename + '.gz')
         if (options.usePrecompiledGzip && gzFile && gzFile.buffer) { // if .gz file already read from disk
           file.zipBuffer = gzFile.buffer
         } else {
-          file.zipBuffer = await zlib.gzip(file.buffer)
+          file.zipBuffer = await zlib.gzip(file.buffer, { level: 9 })
         }
-        ctx.set('content-encoding', 'gzip')
+        ctx.set('Content-Encoding', 'gzip')
         ctx.body = file.zipBuffer
       } else {
         ctx.body = file.buffer
@@ -149,21 +161,12 @@ module.exports = function staticCache(dir, options, files) {
 
     var stream = fs.createReadStream(file.path)
 
-    // update file hash
-    if (!file.md5) {
-      var hash = crypto.createHash('md5')
-      stream.on('data', hash.update.bind(hash))
-      stream.on('end', function () {
-        file.md5 = hash.digest('base64')
-      })
-    }
-
     ctx.body = stream
     // enable gzip will remove content length
     if (shouldGzip) {
-      ctx.remove('content-length')
-      ctx.set('content-encoding', 'gzip')
-      ctx.body = stream.pipe(zlib.createGzip())
+      ctx.remove('Content-Length')
+      ctx.set('Content-Encoding', 'gzip')
+      ctx.body = stream.pipe(zlib.createGzip({ level: 9 }))
     }
   }
 }
@@ -200,7 +203,6 @@ function loadFile(name, dir, options, files) {
   obj.type = obj.mime = mime.lookup(pathname) || 'application/octet-stream'
   obj.mtime = stats.mtime
   obj.length = stats.size
-  obj.md5 = crypto.createHash('md5').update(buffer).digest('base64')
 
   debug('file: ' + JSON.stringify(obj, null, 2))
   if (options.buffer)
