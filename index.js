@@ -141,7 +141,7 @@ module.exports = function staticCache(dir, options, files) {
           });
         });
         if (acceptBr) {
-          ctx.set('Content-Encoding', 'gzip')
+          ctx.set('Content-Encoding', 'br')
           ctx.body = file.brBuffer;
           return;
         }
